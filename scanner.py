@@ -1,5 +1,7 @@
 import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 def grab_banner(sock):
     try:
@@ -9,33 +11,32 @@ def grab_banner(sock):
     except:
         return ""
 
-def scan_port(target, port, results, lock):
+def scan_port(target, port):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
         if sock.connect_ex((target, port)) == 0:
             banner = grab_banner(sock)
-            with lock:
-                results.append((port, banner))
+            sock.close()
+            return (port, banner)
         sock.close()
     except:
         pass
+    return None
 
 def scan_ports(target, start_port, end_port, max_threads=100):
+    port_range = range(start_port, end_port + 1)
     results = []
-    lock = threading.Lock()
-    threads = []
 
-    for port in range(start_port, end_port + 1):
-        t = threading.Thread(target=scan_port, args=(target, port, results, lock))
-        threads.append(t)
-        t.start()
-        if len(threads) >= max_threads:
-            for t in threads:
-                t.join()
-            threads = []
+    scan = partial(scan_port, target)
 
-    for t in threads:
-        t.join()
+    # ThreadPoolExecutor replaces manual thread batching.
+    # Worker threads pick up the next port as soon as they finish one —
+    # no more waiting for an entire batch to complete before continuing.
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        all_results = executor.map(scan, port_range)
+        for result in all_results:
+            if result is not None:
+                results.append(result)
 
     return sorted(results)
