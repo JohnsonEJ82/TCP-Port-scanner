@@ -1,0 +1,25 @@
+# Python cache files — generated automatically when you run Python, not needed on GitHub
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Scan results — these are personal outputs, not part of the project code
+results.csv
+results.json
+*.csv
+*.json
+
+# VS Code settings folder — editor-specific, other people don't need it
+.vscode/
+
+# Windows junk files
+Thumbs.db
+desktop.ini
+
+# Mac junk files
+.DS_Store
+
+# Virtual environment folder (if you ever create one)
+venv/
+env/
