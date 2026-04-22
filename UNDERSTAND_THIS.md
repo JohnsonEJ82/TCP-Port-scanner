@@ -1,209 +1,280 @@
-# Port Scanner — What It Does and How to Talk About It
+# Understanding the Port Scanner — Read This Before Any Professor Conversation
 
-This document explains the project so you can answer any question a professor
-throws at you. No assumed background knowledge.
-
----
-
-## What does this project actually do?
-
-A port scanner checks which "doors" (ports) are open on a computer connected
-to a network.
-
-Every computer has 65,535 TCP ports. Think of them like numbered apartment
-mailboxes. When a service runs on a machine, it "listens" on a specific port:
-- Port 22 → SSH (remote login)
-- Port 80 → HTTP (web traffic)
-- Port 443 → HTTPS (encrypted web traffic)
-
-This scanner tries to connect to each port in a range and reports which ones
-are open, what service is probably running there, and any identifying text
-(called a "banner") the service sends back.
+This document is for you, not for GitHub visitors. It explains what the project
+does, how every part works, and how to talk about it confidently. It also
+connects the project to your actual background so the conversation feels natural
+rather than rehearsed.
 
 ---
 
-## File structure — what each file does
+## What the project actually does
 
-```
-main.py     → Entry point. Reads command-line arguments, coordinates everything.
-scanner.py  → Core logic. Opens sockets, detects open ports, grabs banners.
-utils.py    → Output. Prints the table, writes CSV/JSON files.
-```
+A port scanner checks which services are running on a networked computer by
+attempting to connect to each port in a given range. Every computer has 65,535
+TCP ports — think of them like numbered doors. Services sit behind specific doors
+and wait for incoming connections:
 
-This separation is called "separation of concerns" — each file has one job.
-If you want to change how output works, you only touch utils.py. If you want
-to change scanning logic, you only touch scanner.py.
+    Port 22   is where SSH listens
+    Port 80   is where HTTP listens
+    Port 443  is where HTTPS listens
+
+This scanner knocks on each door in a range, notes which ones open, tries to
+read any greeting message the service sends, and reports everything in a table.
+The complexity is in how it does this efficiently, correctly, and without
+silently hiding errors.
 
 ---
 
-## Key concept: What is a socket?
+## How this connects to your SAP background
 
-A socket is a software object that represents one end of a network connection.
-When your browser connects to a website, it creates a socket. This scanner
-does the same thing programmatically.
+This is worth having ready because a professor will likely ask about your work
+experience. The connection is genuine, not forced.
+
+In SAP GRC you managed access control — who is allowed to do what in which
+system. That is exactly what port scanning informs on the network level: which
+services are exposed and reachable. A port that should be closed but is open
+is the network equivalent of a user having a role they shouldn't have.
+
+Transport management across DEV, QAS, and PROD environments taught you why
+environment separation matters — the same principle applies to network
+segmentation, where services in production should not be reachable from
+development networks.
+
+Incident handling taught you that diagnosing a problem requires distinguishing
+between different failure modes. A user who can't log in because their account
+is locked is a different problem from one who can't log in because their role
+is missing. The scanner applies the same thinking — a timeout is a different
+problem from a refused connection, which is different again from a DNS failure.
+
+You don't need to force these connections into conversation, but if a professor
+asks how your work experience relates to what you're studying, this is the
+honest answer.
+
+---
+
+## The three files and what each one does
+
+main.py is the entry point. It reads what the user typed on the command line,
+validates it, and coordinates the other two files. One job: handle input and
+wire things together.
+
+scanner.py is the core logic. It opens TCP connections, decides whether each
+port is open, closed, or filtered, and reads banners from open ports. All
+network operations happen here.
+
+utils.py handles output only. It prints the results table to the terminal and
+writes CSV or JSON files. It knows nothing about networking.
+
+This pattern is called separation of concerns. Each file has a single
+responsibility. If output formatting needs to change, only utils.py changes.
+If scanning logic changes, only scanner.py changes. Coming from Java, this
+is essentially the same principle as single-responsibility classes.
+
+---
+
+## What a socket is
+
+A socket is a software object representing one end of a network connection.
+When a browser loads a webpage, it creates a socket to talk to the server.
+This scanner creates sockets the same way, programmatically.
 
 ```python
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 ```
 
-- AF_INET → IPv4 (the standard internet address format, e.g. 192.168.1.1)
-- SOCK_STREAM → TCP (a reliable, connection-based protocol)
+AF_INET means IPv4, the standard internet address format.
+SOCK_STREAM means TCP, a reliable connection-based protocol.
+The alternative is UDP (SOCK_DGRAM), which is faster but doesn't guarantee
+delivery and isn't covered by this scanner.
+
+---
+
+## How TCP connect scanning works
+
+When you call:
 
 ```python
 return_code = sock.connect_ex((target, port))
 ```
 
-`connect_ex` tries to connect. If it returns 0, the connection worked → port
-is open. Any other number means it failed → port is closed or filtered.
+Python attempts a full TCP connection. TCP connections use the three-way
+handshake you know from your networking background:
+
+    1. Your machine sends SYN
+    2. If something is listening, it replies SYN-ACK
+    3. Your machine sends ACK to complete the connection
+
+connect_ex handles all three steps automatically. If it returns 0, the
+handshake completed and the port is open. Any other return code means it
+failed — the port is closed or blocked.
+
+This is called a TCP connect scan. It completes the full handshake which makes
+it reliable but also detectable. Tools like Nmap can do a SYN scan, which
+sends the SYN but never completes the handshake, making it stealthier. That
+requires raw socket access and root privileges, so this project uses the
+simpler connect approach.
 
 ---
 
-## Key concept: TCP connect scan
+## Port states and what they mean
 
-This scanner uses TCP connect scanning. It's the simplest scan type:
+open means a service is actively listening and completed the handshake.
 
-1. Send a SYN packet (asking to connect)
-2. If the server replies with SYN-ACK → port is open, complete the handshake
-3. If the server replies with RST → port is closed
-4. If there's no reply at all → port is likely filtered by a firewall
+closed means nothing is listening, but the host responded with a rejection
+packet (RST). The machine is reachable but that port is not in use.
 
-`connect_ex` does all of this automatically. You don't manually control the
-TCP handshake.
+filtered means there was no response at all within the timeout window. This
+is usually a firewall silently dropping packets. The scanner infers this from
+a socket.timeout exception.
 
-### Why not SYN scan (half-open scan)?
-
-SYN scanning sends the SYN but never completes the handshake — it's faster and
-stealthier, but requires raw socket access, which needs root/admin privileges.
-TCP connect scan is fine for educational purposes and works without elevated
-permissions.
+error means something went wrong on the scanner's side — typically a DNS
+failure (hostname couldn't be resolved) or an OS-level socket problem.
 
 ---
 
-## Key concept: Port states
+## Why threading is necessary
 
-| State    | Meaning                                              |
-|----------|------------------------------------------------------|
-| open     | A service is actively listening on this port         |
-| closed   | Nothing is listening, but the host responded (RST)   |
-| filtered | No response — firewall is silently dropping packets  |
-| error    | Scanner-side problem (DNS failure, OS error)         |
+Without threading, the scanner handles one port at a time. Each connection
+waits up to 1 second for a response. Scanning ports 80 to 500 would take
+around 420 seconds — about 7 minutes. Threading lets hundreds of ports be
+tested simultaneously.
 
----
-
-## Key concept: Threading — why do we need it?
-
-If you scanned one port at a time and each connection waited 1 second for a
-response, scanning ports 20–1024 would take 1004 seconds (≈17 minutes).
-
-Threading lets the scanner wait for many connections at the same time.
-Each thread handles one port, and they all run concurrently.
-
-### Old approach (manual threading — what was in the original code):
+The first version used manual thread batching:
 
 ```python
-threads = []
-for port in ports:
-    t = threading.Thread(target=scan_port, ...)
-    threads.append(t)
-    t.start()
-    if len(threads) >= max_threads:
-        for t in threads:
-            t.join()   # WAIT for ALL threads to finish before continuing
-        threads = []
+if len(threads) >= max_threads:
+    for t in threads:
+        t.join()
+    threads = []
 ```
 
-Problem: This is batching. You start 100 threads, wait for all 100 to finish
-(even the fast ones), then start the next 100. A slow port in one batch holds
-up the entire batch.
+join() waits for every thread in the batch to finish before starting new ones.
+If one port takes 900ms and all others finish in 50ms, every fast thread sits
+idle waiting for that one slow port.
 
-### New approach (ThreadPoolExecutor — what this version uses):
+The current version uses ThreadPoolExecutor:
 
 ```python
-with ThreadPoolExecutor(max_workers=100) as executor:
-    all_results = executor.map(scan, port_range)
+with ThreadPoolExecutor(max_workers=max_threads) as executor:
+    all_results = executor.map(lambda port: scan_port(target, port), port_range)
 ```
 
-A pool of 100 worker threads is created once. As soon as one thread finishes a
-port, it immediately picks up the next one. There's no batching delay. This is
-genuine concurrency.
+A fixed pool of worker threads is created once. As soon as any thread finishes,
+it picks up the next port from the queue immediately. No batching delay.
 
-Analogy: Old approach = a restaurant where all tables must finish eating before
-the waiter takes new orders. New approach = a waiter who takes the next order
-as soon as any table is done.
-
----
-
-## Key concept: Banner grabbing
-
-When a service is open, it often sends a greeting message. This is called a
-banner. Example banners:
-
-- SSH:  `SSH-2.0-OpenSSH_8.4p1 Ubuntu-6ubuntu2.1`
-- FTP:  `220 ProFTPD 1.3.5 Server ready`
-- HTTP: `HTTP/1.1 200 OK` followed by server headers
-
-These banners reveal the software and sometimes the version — useful for
-identifying services and (in security research) known vulnerabilities.
-
-### Protocol differences matter
-
-Not all protocols behave the same way:
-
-| Protocol | Who speaks first?  | What to do                      |
-|----------|--------------------|----------------------------------|
-| SSH      | Server speaks first | Just listen (recv immediately)  |
-| FTP      | Server speaks first | Just listen                     |
-| SMTP     | Server speaks first | Just listen                     |
-| HTTP     | Client speaks first | Send "HEAD / HTTP/1.0\r\n\r\n"  |
-| Unknown  | Unclear             | Try passive first, then HTTP    |
-
-The original code always sent an HTTP probe — so it got no banner from SSH
-or FTP. The updated version handles each protocol correctly.
+The lambda is wrapping scan_port so that executor.map can call it with just
+the port number — target stays the same for every call. In Java terms this is
+similar to a method reference passed to a thread pool with a pre-bound argument.
 
 ---
 
-## Key concept: Error handling
+## Banner grabbing and why protocols are handled separately
 
-Original code had:
+When a port is open, many services send a greeting message on connect — called
+a banner. Examples:
+
+    SSH:   SSH-2.0-OpenSSH_8.4p1 Ubuntu-6ubuntu2.1
+    FTP:   220 ProFTPD 1.3.5 Server ready
+    HTTP:  HTTP/1.1 200 OK
+
+Banners are useful because they reveal the software and sometimes the version
+running on that port. In security research this matters because specific
+versions may have known vulnerabilities — the kind of thing your GRC access
+risk reports flagged at the compliance level, but at the service level instead.
+
+The key problem is that protocols behave differently on connect. SSH, FTP, and
+SMTP send their banner immediately without waiting for you to speak first. HTTP
+requires you to send a request before it responds. The first version of this
+scanner always sent an HTTP probe, so SSH and FTP ports always returned empty
+banners — the service had already spoken and was waiting for a response that
+never came.
+
+The current version handles this with two port groups:
+
+    PASSIVE_BANNER_PORTS contains ports where you just listen
+    HTTP_PORTS contains ports where you send a HEAD request first
+
+For ports outside both groups, the scanner listens first and falls back to an
+HTTP probe if nothing comes back. There is a TODO in the code noting that other
+protocol patterns aren't covered — SMTP extensions, database handshakes, and
+others all have their own conventions.
+
+---
+
+## Error handling and why bare except is a problem
+
+The original code had this everywhere:
+
 ```python
 except:
     pass
 ```
 
-This silently ignores every possible error — including ones you'd want to
-know about, like the target hostname not existing, or running out of file
-descriptors.
+This makes a timeout look identical to a DNS failure which looks identical to
+running out of file descriptors. Results can be wrong and you have no way of
+knowing why.
 
-Updated code distinguishes:
+The current version separates them:
+
 ```python
-except socket.timeout:        → port is filtered (firewall dropping packets)
-except socket.gaierror:       → DNS failed (hostname doesn't resolve)
-except OSError:               → OS-level error (log it, don't crash)
+except socket.timeout:
+    result["state"] = "filtered"
+
+except socket.gaierror as e:
+    logging.error(f"Could not resolve hostname '{target}': {e}")
+    result["state"] = "error"
+
+except OSError as e:
+    logging.warning(f"Port {port}: {e}")
+    result["state"] = "error"
 ```
 
-This is important for both software quality and for diagnosing incorrect
-results. Hiding errors hides bugs.
+socket.timeout specifically means the connection attempt timed out with no
+response — the signature of a firewall dropping packets.
+
+socket.gaierror is a DNS resolution failure. gaierror stands for getaddrinfo
+error, which is the underlying system call that resolves hostnames.
+
+OSError is a broader catch for operating system level socket problems such as
+running out of available file descriptors.
+
+logging is used instead of print() so errors go to stderr at the appropriate
+severity level rather than mixing with normal output. The logging module works
+similarly to Java's Logger — basicConfig sets the global format and level.
 
 ---
 
-## Key concept: JSON vs CSV output
+## The known bug and how to talk about it
 
-CSV is a flat text format — one row per result. Simple, opens in Excel.
+In main.py, when the start port is greater than the end port, the code prints
+an error but does not stop:
 
-JSON is structured — each result is an object with named fields. Better for:
-- Feeding into other scripts
-- Comparing two scans programmatically
-- Extending the data model (add fields without breaking format)
+```python
+if start > end:
+    print("Error: start port must be less than or equal to end port")
+return start, end  # still runs
+```
 
-Example JSON output:
+The scan continues with a backwards range and returns no results. The correct
+fix is sys.exit(1) or raising an exception, the same way the port range
+validation above it is handled. There is a TODO comment noting this.
+
+If a professor asks about it: "I noticed this when testing invalid inputs —
+it prints the message but doesn't actually stop. I should have raised an
+exception there the same way the other validation errors are handled above it."
+That answer demonstrates you can read your own code critically.
+
+---
+
+## JSON and CSV output
+
+CSV is one row per open port, comma-separated. Opens directly in Excel or
+LibreOffice.
+
+JSON is a structured array where each result is an object with named fields:
+
 ```json
 [
-  {
-    "port": 22,
-    "state": "open",
-    "service": "SSH",
-    "banner": "SSH-2.0-OpenSSH_8.4"
-  },
   {
     "port": 80,
     "state": "open",
@@ -213,98 +284,59 @@ Example JSON output:
 ]
 ```
 
----
-
-## Design decisions you should be able to explain
-
-**Why TCP connect scan and not SYN scan?**
-> SYN scan requires raw sockets, which require root privileges and are more
-> complex to implement. TCP connect is sufficient to demonstrate the concept
-> and works in any user environment.
-
-**Why ThreadPoolExecutor and not manual threading?**
-> ThreadPoolExecutor is the standard library's recommended approach for thread
-> pools. It avoids the batching inefficiency of manual thread management, handles
-> exceptions cleanly, and is significantly fewer lines of code.
-
-**Why is there a timeout set on the socket?**
-> Without a timeout, the scanner would block indefinitely on filtered ports
-> (where the firewall drops packets with no response). A 1-second timeout means
-> filtered ports are classified correctly within a predictable time.
-
-**Why the ethical/legal warning?**
-> Port scanning without permission is illegal in Germany under §202a StGB
-> (unauthorized access to computer systems). Including the warning shows
-> awareness of the legal context — especially relevant in a German university
-> setting.
-
-**Why separate PASSIVE_BANNER_PORTS from HTTP_PORTS?**
-> Different protocols have different communication conventions. Sending an HTTP
-> probe to an SSH port just wastes time and produces garbage. Grouping ports by
-> behavior makes the banner grabbing logic explicit and correct.
+JSON is more useful for feeding results into other scripts, comparing two
+scans programmatically, or extending the data model without breaking the
+format. The dict-based result structure in scanner.py makes this natural
+because each result already has named fields.
 
 ---
 
-## Limitations you should acknowledge
+## Questions you should be ready to answer
 
-These are not weaknesses to hide — professors respect students who know their
-system's limits:
+What is a TCP connect scan and how does it differ from a SYN scan?
+TCP connect completes the full three-way handshake. SYN scan only sends the
+first packet and never completes it — faster and stealthier but requires raw
+sockets and root privileges. This scanner uses TCP connect because it works
+without elevated permissions.
 
-1. **TCP only** — UDP scanning is not implemented. Many services (DNS, DHCP,
-   SNMP) use UDP and would not be detected.
+Why ThreadPoolExecutor instead of manual threading?
+The manual version batched threads and waited for the entire batch before
+starting new ones. One slow port blocked the whole batch. ThreadPoolExecutor
+keeps workers running continuously — as soon as one finishes a port it picks
+up the next one.
 
-2. **No SYN scan** — requires raw sockets / root. Not included by design.
+Why does SSH get handled differently from HTTP in banner grabbing?
+SSH sends its banner the moment you connect. HTTP requires you to send a
+request first. Sending an HTTP probe to an SSH port produces nothing because
+SSH already spoke and is waiting for your response.
 
-3. **connect_ex doesn't distinguish filtered vs timeout reliably** — we infer
-   "filtered" from a socket.timeout exception, but some closed ports also time
-   out if the host silently drops RST packets.
+Why is the timeout 1 second?
+Without a timeout the scanner blocks indefinitely on filtered ports where
+the firewall drops packets silently. One second was enough for testing on
+localhost. On a real network with latency it might need to be higher.
 
-4. **Banner grabbing is best-effort** — encrypted ports (HTTPS, IMAPS) won't
-   reveal useful banner content without TLS negotiation.
+How does this connect to your work experience?
+Port scanning is reconnaissance — finding out what is exposed and reachable.
+That is the technical layer underneath what I was doing operationally in GRC:
+figuring out who or what has access to what, and whether that access is
+appropriate. The diagnostic thinking is the same, the layer is different.
 
-5. **No CIDR range support** — can only scan one host at a time.
-
----
-
-## What you could extend this with (mention this proactively)
-
-- **Async scanning with asyncio** — potentially faster than threading for
-  I/O-bound workloads; would be an interesting performance comparison.
-- **CIDR input support** (e.g. 192.168.1.0/24) — scan entire subnets.
-- **Nmap comparison** — run both on the same target, compare results and
-  timing; good mini research angle.
-- **UDP scanning** — requires raw sockets but reveals a different set of
-  services.
-
----
-
-## How to introduce this in a 30-second pitch
-
-> "I built a multithreaded TCP port scanner in Python to understand how network
-> reconnaissance tools work at the socket level. I ran into the batching
-> inefficiency of manual thread management, so I refactored to ThreadPoolExecutor.
-> I also extended the banner grabbing to handle different protocol behaviors —
-> SSH and FTP send banners immediately on connect, while HTTP requires sending
-> a request first. The scanner outputs to both CSV and JSON."
-
-That's it. Concrete, self-aware, covers a real engineering decision.
+What would you add next?
+An asyncio version to compare performance with threading. CIDR range input
+to scan subnets. A structured comparison against Nmap output on the same
+target to understand where they differ and why.
 
 ---
 
-## Quick reference: how to run it
+## Your pitch — keep it under 45 seconds
 
-```bash
-# Basic scan
-python main.py -t 127.0.0.1 -p 20-1024
-
-# Save as JSON
-python main.py -t 127.0.0.1 -p 20-1024 -o results.json --format json
-
-# Fewer threads (slower but less aggressive)
-python main.py -t 192.168.1.1 -p 1-1024 --threads 50
-
-# Single port
-python main.py -t example.com -p 80-80
-```
-
-No dependencies to install — stdlib only.
+"I have a bachelor's in Networking and Security and spent three years in
+enterprise security at Cognizant before starting the master's. Most of that
+work was at the process level — GRC, access management, incident handling —
+and I wanted to get back to the technical foundations underneath it. This
+scanner was the first thing I built in the program. It touches the socket
+layer directly, which is where most early-stage network attacks happen. The
+interesting problem was threading — the first version batched threads and one
+slow port could hold up an entire batch. Switching to a thread pool fixed that.
+I also had to split the banner grabbing by protocol because SSH and HTTP behave
+completely differently on connect."
