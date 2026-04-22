@@ -1,49 +1,70 @@
 import socket
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 
+# switched from using print() for errors to logging after i kept missing
+# failures during test scans — still getting used to how logging works in Python
+# (in Java i'd use a Logger class, this feels a bit different)
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
+# ports where the service sends a message immediately when you connect
+# found this out when SSH kept returning empty banners — turns out SSH speaks
+# first, you don't need to send anything. had to split these out from HTTP ports.
 PASSIVE_BANNER_PORTS = {
-    21, 22, 25, 110, 143, 587, 993, 995, 3306, 5432,
+    21,   # FTP
+    22,   # SSH
+    25,   # SMTP
+    110,  # POP3
+    143,  # IMAP
 }
 
-HTTP_PORTS = {80, 8080, 8000, 8443}
+# HTTP needs you to send a request before it responds
+HTTP_PORTS = {80, 8080, 8000}
 
+# common port-to-service mapping — just for display
 COMMON_SERVICES = {
     21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP",
     53: "DNS", 80: "HTTP", 110: "POP3", 143: "IMAP",
-    443: "HTTPS", 445: "SMB", 587: "SMTP-Sub", 993: "IMAPS",
-    995: "POP3S", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL",
-    6379: "Redis", 8080: "HTTP-Alt", 8443: "HTTPS-Alt", 27017: "MongoDB"
+    443: "HTTPS", 445: "SMB", 3306: "MySQL", 3389: "RDP",
+    5432: "PostgreSQL", 8080: "HTTP-Alt"
 }
+
 
 def grab_banner(sock, port):
     try:
-        sock.settimeout(2)
+        sock.settimeout(2)  # not sure if 2 seconds is always enough, worked fine on localhost
+
         if port in PASSIVE_BANNER_PORTS:
+            # server sends banner on its own, just read it
             raw = sock.recv(1024).decode(errors="ignore").strip()
             return raw.splitlines()[0] if raw else ""
+
         if port in HTTP_PORTS:
+            # HTTP requires sending a request first
             sock.send(b"HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n")
             raw = sock.recv(1024).decode(errors="ignore").strip()
             return raw.splitlines()[0] if raw else ""
+
+        # for unknown ports: try listening first, fall back to HTTP probe
+        # TODO: there are probably other protocol patterns i'm not covering here
         try:
             raw = sock.recv(512).decode(errors="ignore").strip()
             if raw:
                 return raw.splitlines()[0]
         except socket.timeout:
             pass
+
         sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
         raw = sock.recv(512).decode(errors="ignore").strip()
         return raw.splitlines()[0] if raw else ""
+
     except Exception:
+        # if banner grabbing fails just return empty — don't want it crashing the scan
         return ""
 
+
 def scan_port(target, port):
-    # Results are now dicts instead of tuples — needed for JSON output
-    # and makes the data structure explicit and extensible
+    # using a dict so i can add more fields later without breaking things
     result = {
         "port": port,
         "state": "closed",
@@ -57,6 +78,7 @@ def scan_port(target, port):
         return_code = sock.connect_ex((target, port))
 
         if return_code == 0:
+            # 0 = connection succeeded, port is open
             result["state"] = "open"
             result["banner"] = grab_banner(sock, port)
         else:
@@ -65,24 +87,32 @@ def scan_port(target, port):
         sock.close()
 
     except socket.timeout:
+        # no response usually means a firewall is silently dropping packets
         result["state"] = "filtered"
+
     except socket.gaierror as e:
-        logging.error(f"DNS resolution failed for '{target}': {e}")
+        # hostname couldn't be resolved
+        logging.error(f"Could not resolve hostname '{target}': {e}")
         result["state"] = "error"
+
     except OSError as e:
-        logging.warning(f"Port {port} OS error: {e}")
+        logging.warning(f"Port {port}: {e}")
         result["state"] = "error"
 
     return result
+
 
 def scan_ports(target, start_port, end_port, max_threads=100):
     port_range = range(start_port, end_port + 1)
     open_ports = []
 
-    scan = partial(scan_port, target)
-
+    # ThreadPoolExecutor replaced the manual threading version —
+    # the old approach batched threads and waited for an entire batch to finish
+    # before starting the next one. if one port in the batch was slow, everything
+    # waited. this version keeps threads running as soon as any port finishes.
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        all_results = executor.map(scan, port_range)
+        all_results = executor.map(lambda port: scan_port(target, port), port_range)
+
         for result in all_results:
             if result["state"] == "open":
                 open_ports.append(result)

@@ -3,6 +3,8 @@ import sys
 from scanner import scan_ports
 from utils import print_results, save_results
 
+# added this after reading about port scanning laws in Germany
+# §202a StGB covers unauthorized access — better to be explicit about it
 ETHICAL_WARNING = """
  --------------------------------------------------------------
 |                    ⚠  LEGAL NOTICE  ⚠                        |
@@ -17,12 +19,8 @@ ETHICAL_WARNING = """
 
 
 def parse_ports(port_str):
-    """
-    Parse port argument. Supports:
-      - Range:  "20-1024"
-      - Single: "80"
-      - List:   "22,80,443"  (future extension point)
-    """
+    # handles "20-1024" style input, also single port like "80"
+    # TODO: would be nice to support comma-separated ports like "22,80,443"
     if "-" in port_str:
         parts = port_str.split("-")
         if len(parts) != 2:
@@ -31,7 +29,8 @@ def parse_ports(port_str):
         if not (1 <= start <= 65535 and 1 <= end <= 65535):
             raise argparse.ArgumentTypeError("Ports must be between 1 and 65535")
         if start > end:
-            print("Error: Start port must be <= end port")
+            # TODO: this should probably exit instead of just printing
+            print("Error: start port must be less than or equal to end port")
         return start, end
     else:
         port = int(port_str)
@@ -47,25 +46,23 @@ def main():
         epilog="""
 Examples:
   python main.py -t 127.0.0.1 -p 20-1024
-  python main.py -t example.com -p 80-443 -o results.json --format json
-  python main.py -t 192.168.1.1 -p 22 --threads 50
+  python main.py -t 127.0.0.1 -p 80-500 -o results.json --format json
         """
     )
 
     parser.add_argument("-t", "--target", required=True,
-                        help="Target IP address or hostname (e.g. 127.0.0.1 or example.com)")
+                        help="Target IP or hostname (e.g. 127.0.0.1)")
     parser.add_argument("-p", "--ports", default="20-1024",
-                        help="Port range to scan (default: 20-1024)")
+                        help="Port range (default: 20-1024)")
     parser.add_argument("-o", "--output",
-                        help="Output file path (e.g. results.csv or results.json)")
+                        help="Save results to file")
     parser.add_argument("--threads", type=int, default=100,
-                        help="Number of concurrent threads (default: 100)")
+                        help="Number of threads (default: 100)")
     parser.add_argument("--format", choices=["csv", "json"], default="csv",
-                        help="Output file format: csv or json (default: csv)")
+                        help="Output format: csv or json (default: csv)")
 
     args = parser.parse_args()
 
-    # Parse and validate port range
     try:
         start_port, end_port = parse_ports(args.ports)
     except (ValueError, argparse.ArgumentTypeError) as e:
@@ -74,7 +71,7 @@ Examples:
 
     total_ports = end_port - start_port + 1
     print(f"Target  : {args.target}")
-    print(f"Ports   : {start_port}–{end_port} ({total_ports} total)")
+    print(f"Ports   : {start_port}-{end_port} ({total_ports} total)")
     print(f"Threads : {args.threads}")
     print(f"Format  : {args.format.upper()}\n")
     print("Scanning...\n")
